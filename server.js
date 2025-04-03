@@ -85,3 +85,31 @@ app.post('/notion/query', async (req, res) => {
 app.listen(port, () => {
   console.log(`Server running at http://localhost:${port}`);
 });
+
+app.post('/notion/query', async (req, res) => {
+  const { user_id, action, parameters } = req.body;
+  const token = tokenStore[user_id];
+
+  if (!token) {
+    return res.status(401).json({ error: 'User not connected to Notion' });
+  }
+
+  try {
+    if (action === 'list_databases') {
+      const response = await axios.get('https://api.notion.com/v1/databases', {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Notion-Version': '2022-06-28'
+        }
+      });
+
+      return res.json({ databases: response.data });
+    }
+
+    res.status(400).json({ error: 'Unsupported action' });
+  } catch (err) {
+    console.error(err.response?.data || err.message);
+    res.status(500).json({ error: 'Notion API query failed' });
+  }
+});
+
