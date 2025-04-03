@@ -9,20 +9,29 @@ const port = process.env.PORT || 3000;
 // PostgreSQL connection using Railway's DATABASE_URL
 const db = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: process.env.DATABASE_URL.includes('railway')
-    ? { rejectUnauthorized: false }
-    : false
+  // Always use SSL in production (Railway)
+  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
 });
 
-// Ensure notion_tokens table exists
+// Test database connection first
 (async () => {
-  await db.query(`
-    CREATE TABLE IF NOT EXISTS notion_tokens (
-      user_id TEXT PRIMARY KEY,
-      access_token TEXT NOT NULL
-    );
-  `);
-  console.log('✅ PostgreSQL connected and table verified');
+  try {
+    const client = await db.connect();
+    console.log('✅ Successfully connected to PostgreSQL database');
+    client.release();
+    
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS notion_tokens (
+        user_id TEXT PRIMARY KEY,
+        access_token TEXT NOT NULL
+      );
+    `);
+    console.log('✅ PostgreSQL table verified');
+  } catch (err) {
+    console.error('❌ Database connection error:', err);
+    console.error('Database URL format:', process.env.DATABASE_URL ? process.env.DATABASE_URL.replace(/:[^:]*@/, ':****@') : 'undefined');
+    process.exit(1); // Exit if DB connection fails
+  }
 })();
 
 app.use(express.json());
