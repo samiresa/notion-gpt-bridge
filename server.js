@@ -10,12 +10,12 @@ const tokenStore = {};
 
 app.use(express.json());
 
-// Root
+// Root health check
 app.get('/', (req, res) => {
   res.send('Notion GPT Bridge is running.');
 });
 
-// OAuth Step 1: Redirect to Notion auth
+// OAuth Step 1: Redirect user to Notion auth
 app.get('/notion/connect', (req, res) => {
   const { user_id } = req.query;
   const notionAuthUrl = `https://api.notion.com/v1/oauth/authorize?owner=workspace&client_id=${process.env.NOTION_CLIENT_ID}&redirect_uri=${process.env.REDIRECT_URI}&response_type=code&state=${user_id}`;
@@ -52,7 +52,7 @@ app.get('/oauth/callback', async (req, res) => {
   }
 });
 
-// Status check for frontend or GPT use
+// Connection status check
 app.get('/notion/status', (req, res) => {
   const { user_id } = req.query;
   const isConnected = !!tokenStore[user_id];
@@ -70,14 +70,20 @@ app.post('/notion/query', async (req, res) => {
 
   try {
     if (action === 'list_databases') {
-      const response = await axios.get('https://api.notion.com/v1/databases', {
+      const response = await axios.post('https://api.notion.com/v1/search', {
+        filter: {
+          property: "object",
+          value: "database"
+        }
+      }, {
         headers: {
           'Authorization': `Bearer ${token}`,
-          'Notion-Version': '2022-06-28'
+          'Notion-Version': '2022-06-28',
+          'Content-Type': 'application/json'
         }
       });
 
-      return res.json({ databases: response.data });
+      return res.json({ databases: response.data.results });
     }
 
     res.status(400).json({ error: 'Unsupported action' });
@@ -87,7 +93,12 @@ app.post('/notion/query', async (req, res) => {
   }
 });
 
-// Start server
+// Debug route (optional, useful for confirming deployment)
+app.get('/debug/ping', (req, res) => {
+  res.send('✅ This is the live deployed version of server.js');
+});
+
+// Start the server
 app.listen(port, () => {
   console.log(`🚀 Server running at http://localhost:${port}`);
 });
