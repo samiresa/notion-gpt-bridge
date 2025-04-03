@@ -1,0 +1,45 @@
+openapi: 3.0.1
+info:
+  title: Notion GPT Bridge
+  description: A backend service that allows a GPT to access Notion data on behalf of a user.
+  version: 1.0.0
+servers:
+  - url: https://notion-gpt-bridge-production.up.railway.app
+paths:
+  /notion/query:
+    post:
+      summary: Perform an action on the connected Notion workspace
+      operationId: queryNotion
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                user_id:
+                  type: string
+                  description: The ID of the user who authorized the Notion integration
+                action:
+                  type: string
+                  enum: [list_databases]
+                  description: The type of action to perform
+                parameters:
+                  type: object
+                  description: (Optional) Parameters for the action
+      responses:
+        '200':
+          description: Successful response from Notion
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  databases:
+                    type: array
+                    items:
+                      type: object
+        '401':
+          description: User not connected
+        '500':
+          description: Notion API query failed
