@@ -1,61 +1,134 @@
 const express = require('express');
 const axios = require('axios');
-const { Pool } = require('pg');
 require('dotenv').config();
 
 const app = express();
-const port = process.env.PORT || 3000;
-
-// PostgreSQL connection using Railway's DATABASE_URL
-const db = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  // Always use SSL in production (Railway)
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
-});
-
-// Test database connection first
-(async () => {
-  try {
-    const client = await db.connect();
-    console.log('✅ Successfully connected to PostgreSQL database');
-    client.release();
-    
-    await db.query(`
-      CREATE TABLE IF NOT EXISTS notion_tokens (
-        user_id TEXT PRIMARY KEY,
-        access_token TEXT NOT NULL
-      );
-    `);
-    console.log('✅ PostgreSQL table verified');
-  } catch (err) {
-    console.error('❌ Database connection error:', err);
-    console.error('Database URL format:', process.env.DATABASE_URL ? process.env.DATABASE_URL.replace(/:[^:]*@/, ':****@') : 'undefined');
-    process.exit(1); // Exit if DB connection fails
-  }
-})();
+const port = process.env.PORT || 8080;
 
 app.use(express.json());
 
-// Health check
+// Temporary in-memory token store
+const tokenStore = {};
+
+// Root route
 app.get('/', (req, res) => {
-  res.send('🌉 Notion GPT Bridge is running with PostgreSQL.');
+  res.send('Notion GPT Bridge is running.');
 });
 
-// Step 1: Notion OAuth Redirect
+// DEBUG endpoint
+app.post('/debug', (req, res) => {
+  console.log('[DEBUG] Request received:', JSON.stringify(req.body, null, 2));
+  res.status(200).send('Debug OK');
+});
+
+// 🔧 GPT Action Endpoint
+app.post('/notion/query', async (req, res) => {
+  console.log('[🟢 /notion/query HIT]');
+  console.log('Request Body:', JSON.stringify(req.body, null, 2));
+
+  const { user_id, action, parameters = {} } = req.body;
+  const token = tokenStore[user_id];
+
+  if (!token) {
+    console.warn(`[🔒] No token found for user: ${user_id}`);
+    return res.status(401).json({ error: 'User not connected to Notion' });
+  }
+
+  try {
+    const headers = {
+      'Authorization': `Bearer ${token}`,
+      'Notion-Version': '2022-06-28',
+      'Content-Type': 'application/json',
+    };
+
+    switch (action) {
+      case 'list_databases': {
+        const response = await axios.get('https://api.notion.com/v1/search', {
+          headers,
+          data: {
+            filter: {
+              value: 'database',
+              property: 'object'
+            }
+          }
+        });
+        return res.json({ databases: response.data.results });
+      }
+
+      case 'query_database': {
+        const { database_id, filter } = parameters;
+        const response = await axios.post(
+          `https://api.notion.com/v1/databases/${database_id}/query`,
+          filter || {},
+          { headers }
+        );
+        return res.json({ results: response.data.results });
+      }
+
+      case 'create_page': {
+        const { parent, properties } = parameters;
+        const response = await axios.post(
+          `https://api.notion.com/v1/pages`,
+          { parent, properties },
+          { headers }
+        );
+        return res.json({ page: response.data });
+      }
+
+      case 'update_page': {
+        const { page_id, properties } = parameters;
+        const response = await axios.patch(
+          `https://api.notion.com/v1/pages/${page_id}`,
+          { properties },
+          { headers }
+        );
+        return res.json({ page: response.data });
+      }
+
+      case 'create_blocks': {
+        const { block_id, children } = parameters;
+        const response = await axios.patch(
+          `https://api.notion.com/v1/blocks/${block_id}/children`,
+          { children },
+          { headers }
+        );
+        return res.json({ blocks: response.data });
+      }
+
+      case 'create_database': {
+        const { parent, title, properties } = parameters;
+        const response = await axios.post(
+          `https://api.notion.com/v1/databases`,
+          { parent, title, properties },
+          { headers }
+        );
+        return res.json({ database: response.data });
+      }
+
+      default:
+        return res.status(400).json({ error: 'Unsupported action' });
+    }
+  } catch (err) {
+    const data = err.response?.data || err.message;
+    console.error('[❌ ERROR]:', data);
+    return res.status(500).json({ error: 'Notion API error', details: data });
+  }
+});
+
+// 🔐 Notion OAuth Initiation
 app.get('/notion/connect', (req, res) => {
   const { user_id } = req.query;
-  if (!user_id) return res.status(400).send('Missing user_id');
-
-  const notionAuthUrl = `https://api.notion.com/v1/oauth/authorize?owner=workspace&client_id=${process.env.NOTION_CLIENT_ID}&redirect_uri=${process.env.REDIRECT_URI}&response_type=code&state=${user_id}`;
-  res.redirect(notionAuthUrl);
+  const redirectUri = encodeURIComponent(process.env.REDIRECT_URI);
+  const authUrl = `https://api.notion.com/v1/oauth/authorize?owner=workspace&client_id=${process.env.NOTION_CLIENT_ID}&redirect_uri=${redirectUri}&response_type=code&state=${user_id}`;
+  res.redirect(authUrl);
 });
 
-// Step 2: Notion OAuth Callback
+// 🔑 OAuth Callback
 app.get('/oauth/callback', async (req, res) => {
   const { code, state: user_id } = req.query;
 
   try {
-    const response = await axios.post(
+    const tokenRes = await axios.post(
       'https://api.notion.com/v1/oauth/token',
       {
         grant_type: 'authorization_code',
@@ -73,97 +146,19 @@ app.get('/oauth/callback', async (req, res) => {
       }
     );
 
-    const accessToken = response.data.access_token;
+    const accessToken = tokenRes.data.access_token;
+    tokenStore[user_id] = accessToken;
 
-    await db.query(
-      'INSERT INTO notion_tokens (user_id, access_token) VALUES ($1, $2) ON CONFLICT (user_id) DO UPDATE SET access_token = EXCLUDED.access_token',
-      [user_id, accessToken]
-    );
-
-    console.log(`🔐 Stored Notion token for user: ${user_id}`);
-    res.send('<h2>✅ Success! Your Notion account is connected and stored securely.</h2>');
+    console.log(`🔐 Token stored for user ${user_id}`);
+    res.send(`<h2>✅ Connected! Notion integration successful for user: ${user_id}</h2>`);
   } catch (err) {
-    console.error('❌ OAuth callback error:', err.response?.data || err.message);
-    res.status(500).send('OAuth Error: Failed to get Notion token.');
+    const message = err.response?.data || err.message;
+    console.error('[OAuth Error]:', message);
+    res.status(500).send('OAuth error. Failed to retrieve token.');
   }
 });
 
-// Helper to retrieve token
-async function getTokenForUser(user_id) {
-  const result = await db.query('SELECT access_token FROM notion_tokens WHERE user_id = $1', [user_id]);
-  return result.rows[0]?.access_token || null;
-}
-
-// GPT-compatible Notion query endpoint
-app.post('/notion/query', async (req, res) => {
-  const { user_id, action, parameters } = req.body;
-
-  if (!user_id) return res.status(400).json({ error: 'Missing user_id' });
-
-  const token = await getTokenForUser(user_id);
-  if (!token) return res.status(401).json({ error: 'User not connected to Notion' });
-
-  const headers = {
-    'Authorization': `Bearer ${token}`,
-    'Notion-Version': '2022-06-28',
-    'Content-Type': 'application/json'
-  };
-
-  try {
-    switch (action) {
-      case 'list_databases': {
-        const response = await axios.post('https://api.notion.com/v1/search', {
-          filter: { property: 'object', value: 'database' }
-        }, { headers });
-        return res.json({ databases: response.data.results });
-      }
-
-      case 'query_database': {
-        const { database_id, filter, sorts } = parameters || {};
-        if (!database_id) return res.status(400).json({ error: 'Missing database_id in parameters' });
-
-        const response = await axios.post(
-          `https://api.notion.com/v1/databases/${database_id}/query`,
-          { filter, sorts },
-          { headers }
-        );
-        return res.json({ results: response.data.results });
-      }
-
-      case 'create_page': {
-        const { parent, properties } = parameters || {};
-        if (!parent || !properties) return res.status(400).json({ error: 'Missing parent or properties' });
-
-        const response = await axios.post(
-          `https://api.notion.com/v1/pages`,
-          { parent, properties },
-          { headers }
-        );
-        return res.json({ page: response.data });
-      }
-
-      case 'update_page': {
-        const { page_id, properties } = parameters || {};
-        if (!page_id || !properties) return res.status(400).json({ error: 'Missing page_id or properties' });
-
-        const response = await axios.patch(
-          `https://api.notion.com/v1/pages/${page_id}`,
-          { properties },
-          { headers }
-        );
-        return res.json({ page: response.data });
-      }
-
-      default:
-        return res.status(400).json({ error: `Unsupported action: ${action}` });
-    }
-  } catch (err) {
-    console.error('❌ Notion API failed:', err.response?.data || err.message);
-    res.status(500).json({ error: 'Notion API query failed' });
-  }
-});
-
-// Start server
+// Start the server
 app.listen(port, () => {
-  console.log(`🚀 Notion GPT Bridge is live on port ${port}`);
+  console.log(`🚀 Notion GPT Bridge is running on port ${port}`);
 });
